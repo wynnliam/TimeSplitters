@@ -11,10 +11,11 @@
 #include <string.h>
 #include <stdint.h>
 #include <ts/packfile/packfile.h>
+#include <ts/err/err.h>
 
 void handle_packfile_open_error(
   const char* file,
-  const TS_PACKFILE_OPEN_RESULT err
+  const TS_RESULT err
 );
 
 void print_toc_entry(PTS_PACKFILE_TOC_ENTRY e);
@@ -22,10 +23,9 @@ void print_toc_entry(PTS_PACKFILE_TOC_ENTRY e);
 int main(int argc, char** argv) {
   int entry_index;
   int i;
-  TS_PACKFILE_OPEN_RESULT open_result;
   TS_PACKFILE packfile;
-  int result;
   TS_PACKFILE_TOC_ENTRY toc_entry;
+  TS_RESULT result;
 
   //
   // Intro and usage.
@@ -39,9 +39,9 @@ int main(int argc, char** argv) {
     exit(-1);
   }
 
-  open_result = packfile_open(argv[1], &packfile);
-  if (open_result != TS_PACKFILE_OPEN_SUCCESS) {
-    handle_packfile_open_error(argv[1], open_result);
+  result = packfile_open(argv[1], &packfile);
+  if (result != TS_OK) {
+    handle_packfile_open_error(argv[1], result);
   }
 
   printf("Packfile size: %lu bytes\n", packfile.toc_sz);
@@ -58,9 +58,9 @@ int main(int argc, char** argv) {
       &toc_entry
     );
 
-    if (result == 0) {
+    if (result != TS_OK) {
       fprintf(stderr, "failed to read %d entry of packfile\n", entry_index);
-      close(packfile.fd);
+      packfile_close(&packfile);
       exit(-1);
     }
 
@@ -69,26 +69,28 @@ int main(int argc, char** argv) {
     printf("---\n");
   }
 
-  close(packfile.fd);
+  packfile_close(&packfile);
 
   return 0;
 }
 
 void handle_packfile_open_error(
   const char* file,
-  const TS_PACKFILE_OPEN_RESULT err
+  const TS_RESULT err
 ) {
   printf("Failed to open %s: ", file);
 
   switch (err) {
-    case TS_PACKFILE_OPEN_ERR_FD:
-      printf("file not found or cannot be opened\n");
+    case TS_ERR_IO:
+      printf("failed to find and/or open file\n");
       break;
-    case TS_PACKFILE_OPEN_ERR_NOT_A_PACKFILE:
+    case TS_ERR_NOT_PACK:
       printf("file is not a packfile\n");
       break;
-    case TS_PACKFILE_OPEN_ERR_BAD_TOC_SZ:
-      printf("bad ToC size\n");
+    case TS_ERR_MALFORMED:
+      printf("empty ToC or truncated packfile\n");
+      break;
+    default:
       break;
   }
 

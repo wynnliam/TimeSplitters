@@ -5,8 +5,6 @@
 #include <unistd.h>
 #include <string.h>
 
-// TODO: Fix for fails!!!
-
 //
 // Boolean flag that tells us if this machine is big endian or not.
 //
@@ -27,14 +25,14 @@ static int packfile_is_pack_file(int fd);
 // the number of packfile entries.
 //
 
-static size_t packfile_get_pack_toc_size(int fd);
+static TS_RESULT packfile_get_pack_toc_size(int fd, int* toc_sz);
 
 //
 // General purpose routine that reads a 32-bit int as unsigned. N.B. this will
 // update the file offset.
 //
 
-static uint32_t packfile_read_uint32(int fd);
+static TS_RESULT packfile_read_u32(int fd, uint32_t* val);
 
 /* PACKFILE IMPL */
 
@@ -54,8 +52,18 @@ void packfile_lib_init() {
   }
 }
 
-TS_PACKFILE_OPEN_RESULT packfile_open(const char* path, PTS_PACKFILE pf) {
+TS_RESULT packfile_open(const char* path, PTS_PACKFILE pf) {
   int fd;
+  TS_RESULT result;
+  int toc_sz;
+
+  if (!pf) {
+    return TS_ERR_INVALID;
+  }
+
+  pf->fd = 0;
+  pf->toc_sz = 0;
+  pf->num_toc_entries = 0;
 
   //
   // Open the file, and verify it is a packfile.
@@ -64,29 +72,41 @@ TS_PACKFILE_OPEN_RESULT packfile_open(const char* path, PTS_PACKFILE pf) {
   fd = open(path, O_RDONLY);
 
   if (fd == -1) {
-    return TS_PACKFILE_OPEN_ERR_FD;
+    return TS_ERR_IO;
   }
 
   if (packfile_is_pack_file(fd) == 0) {
-    return TS_PACKFILE_OPEN_ERR_NOT_A_PACKFILE;
+    close(fd);
+    return TS_ERR_NOT_PACK;
+  }
+
+  //
+  // Now read the ToC size and set the member values accordingly.
+  //
+
+  result = packfile_get_pack_toc_size(fd, &toc_sz);
+
+  if (toc_sz == 0) {
+    close(fd);
+    return TS_ERR_MALFORMED;
   }
 
   pf->fd = fd;
-  // TODO: Error check this.
-  pf->toc_sz = packfile_get_pack_toc_size(fd);
+  pf->toc_sz = toc_sz;
   pf->num_toc_entries = pf->toc_sz / (int)sizeof(TS_PACKFILE_TOC_ENTRY);
 
-  return TS_PACKFILE_OPEN_SUCCESS;
+  return TS_OK;
 }
 
-int packfile_read_toc_entry(
+TS_RESULT packfile_read_toc_entry(
   PTS_PACKFILE packfile,
   const int entry_index,
-  PTS_PACKFILE_TOC_ENTRY result
+  PTS_PACKFILE_TOC_ENTRY pte
 ) {
   int fd;
   off_t currpos;
   int n;
+  TS_RESULT result;
 
   //
   // Really basic verification of args that we can fail on. N.B. I am not gonna
@@ -94,16 +114,16 @@ int packfile_read_toc_entry(
   // verification isn't appropriate here.
   //
 
-  if (!packfile || !result) {
-    return 0;
+  if (!packfile || !pte) {
+    return TS_ERR_INVALID;
   }
 
   if (entry_index < 0) {
-    return 0;
+    return TS_ERR_RANGE;
   }
 
   if (entry_index >= packfile->num_toc_entries) {
-    return 0;
+    return TS_ERR_RANGE;
   }
 
   fd = packfile->fd;
@@ -115,7 +135,7 @@ int packfile_read_toc_entry(
 
   currpos = lseek(fd, -packfile->toc_sz, SEEK_END);
   if (currpos == -1) {
-    return 0;
+    return TS_ERR_IO;
   }
 
   //
@@ -124,23 +144,35 @@ int packfile_read_toc_entry(
 
   currpos = lseek(fd, entry_index * sizeof(TS_PACKFILE_TOC_ENTRY), SEEK_CUR);
   if (currpos == -1) {
-    return 0;
+    return TS_ERR_IO;
   }
 
-  n = read(fd, result->filename, 48);
+  n = read(fd, pte->filename, 48);
   if (n != 48) {
-    return 0;
+    return TS_ERR_EOF;
   }
 
-  result->offset = packfile_read_uint32(fd);
-  result->size = packfile_read_uint32(fd);
-  result->field_0x38 = packfile_read_uint32(fd);
+  result = packfile_read_u32(fd, &(pte->offset));
+  if (result != TS_OK) {
+    return TS_ERR_EOF;
+  }
 
-  return 1;
+  result = packfile_read_u32(fd, &(pte->size));
+  if (result != TS_OK) {
+    return TS_ERR_EOF;
+  }
+
+  result = packfile_read_u32(fd, &(pte->field_0x38));
+  if (result != TS_OK) {
+    return TS_ERR_EOF;
+  }
+
+  return TS_OK;
 }
 
-int packfile_close(PTS_PACKFILE pf) {
-  return 0;
+TS_RESULT packfile_close(PTS_PACKFILE pf) {
+  close(pf->fd);
+  return TS_OK;
 }
 
 /* UTILITY ROUTINE IMPL */
@@ -177,8 +209,14 @@ int packfile_is_pack_file(int fd) {
   return magic == 0x4b433450;*/
 }
 
-size_t packfile_get_pack_toc_size(int fd) {
+TS_RESULT packfile_get_pack_toc_size(int fd, int* toc_sz) {
   off_t currpos;
+  TS_RESULT result;
+  uint32_t val;
+
+  if (!toc_sz) {
+    return TS_ERR_INVALID;
+  }
 
   //
   // Reset the file offset to byte 8. After the 4-byte magic, we have 4-bytes
@@ -190,20 +228,33 @@ size_t packfile_get_pack_toc_size(int fd) {
   currpos = lseek(fd, 8, SEEK_SET);
 
   if (currpos == -1) {
-    return 0;
+    return TS_ERR_IO;
   }
 
   //
   // Read the next 4 bytes which are the size.
   //
 
-  return (size_t)packfile_read_uint32(fd);
+  result = packfile_read_u32(fd, &val);
+  if (result != TS_OK) {
+    return TS_ERR_EOF;
+  }
+
+  *toc_sz = (int)val;
+
+  return TS_OK;
 }
 
-uint32_t packfile_read_uint32(int fd) {
+TS_RESULT packfile_read_u32(int fd, uint32_t* val) {
   uint8_t buf[4];
   int n;
   uint32_t result;
+
+  if (!val) {
+    return TS_ERR_INVALID;
+  }
+
+  *val = 0;
 
   //
   // N.B. I had to use uint8_t instead of char. If I used char, then when I do
@@ -213,7 +264,7 @@ uint32_t packfile_read_uint32(int fd) {
   n = read(fd, buf, 4);
 
   if (n != 4) {
-    return 0;
+    return TS_ERR_EOF;
   }
 
   result = 0;
@@ -232,5 +283,7 @@ uint32_t packfile_read_uint32(int fd) {
       | ((uint32_t)(buf[3]) << 24);
   }
 
-  return result;
+  *val = result;
+
+  return TS_OK;
 }
